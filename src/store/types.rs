@@ -1,7 +1,11 @@
 use crate::Error;
 use serde::{Deserialize, Serialize};
 use std::convert::TryInto;
-use std::{cmp::Ordering, collections::HashMap};
+use std::{cmp::Ordering};
+use std::collections::BTreeMap as HashMap;
+
+use nanoserde::{ToJSON,SerJson};
+use minicbor::{Encode,Decode};
 
 // Some general notes
 //
@@ -47,34 +51,34 @@ pub enum PropRef<'a> {
     Boolean(bool),
     Text(&'a str),
     Blob(&'a [u8]),
-    Null,
+    Null
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize,ToJSON,Encode,Decode)]
 pub enum PropOwned {
-    Id(u64),
-    Integer(i64),
-    Real(f64),
-    Boolean(bool),
-    Text(String),
-    Blob(Vec<u8>),
-    Null,
+    #[n(0)] Id( #[n(0)] u64),
+    #[n(1)] Integer( #[n(0)] i64),
+    #[n(2)] Real( #[n(0)] f64),
+    #[n(3)] Boolean( #[n(0)] bool),
+    #[n(4)] Text( #[n(0)] String),
+    #[n(5)] Blob( #[n(0)] Vec<u8>),
+    #[n(6)] Null,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default,Debug, Clone, PartialEq, Serialize, Deserialize,ToJSON,Encode,Decode)]
 pub struct Node {
-    pub(crate) id: u64,
-    pub(crate) label: String,
-    pub(crate) properties: HashMap<String, PropOwned>,
+    #[n(0)] pub(crate) id: u64,
+    #[n(1)] pub(crate) label: String,
+    #[n(2)] pub(crate) properties: HashMap<String, PropOwned>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default,Debug, Clone, PartialEq, Serialize, Deserialize,ToJSON,Encode,Decode)]
 pub struct Edge {
-    pub(crate) id: u64,
-    pub(crate) label: String,
-    pub(crate) properties: HashMap<String, PropOwned>,
-    pub(crate) origin: u64,
-    pub(crate) target: u64,
+    #[n(0)] pub(crate) id: u64,
+    #[n(1)] pub(crate) label: String,
+    #[n(2)] pub(crate) properties: HashMap<String, PropOwned>,
+    #[n(3)] pub(crate) origin: u64,
+    #[n(4)] pub(crate) target: u64,
 }
 
 impl Node {
@@ -171,5 +175,11 @@ impl<'a> PropRef<'a> {
             Self::Integer(val) => Ok(val.try_into().map_err(|_| Error::TypeMismatch)?),
             _ => Err(Error::TypeMismatch),
         }
+    }
+}
+
+impl Default for PropOwned {
+    fn default() -> Self{
+        PropOwned::Null
     }
 }

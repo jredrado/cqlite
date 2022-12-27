@@ -49,6 +49,8 @@ use planner::QueryPlan;
 use runtime::{Program, Status, VirtualMachine};
 use std::{convert::TryInto, path::Path};
 use store::{Store, StoreTxn};
+pub use store::vault::Vault;
+pub use store::types::{Node,Edge};
 
 pub(crate) mod error;
 pub(crate) mod params;
@@ -64,6 +66,7 @@ mod ffi;
 pub use error::Error;
 pub use params::Params;
 pub use property::Property;
+
 
 /// A graph is a collection of nodes and edges.
 ///
@@ -147,6 +150,11 @@ impl Graph {
     pub fn open_anon() -> Result<Self, Error> {
         let store = Store::open_anon()?;
         Ok(Self { store })
+    }
+
+    pub fn with_vault<V: Vault<Error=crate::error::Error>>(mut self, vault: V) -> Self {
+        self.store = self.store.with_vault(vault);
+        self
     }
 
     /// Prepare a statement given a query `&str`. Queries support

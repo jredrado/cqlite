@@ -4,17 +4,22 @@ use sanakirja::{btree, Env, MutTxn, RootDb, Storable, UnsizedStorable};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::sync::Arc;
+
 use txn::DynTxn;
 
 mod iter;
 mod txn;
-mod types;
+pub(crate) mod types;
+pub(crate) mod vault;
 
 #[cfg(test)]
 mod tests;
 
 pub(crate) use iter::{EdgeIter, NodeIter};
 pub use types::{Edge, Node, PropOwned, PropRef};
+
+pub use vault::Vault;
 
 const ID_SQUENCE: usize = 0;
 const DB_NODES: usize = 1;
@@ -25,6 +30,7 @@ const DB_LABELS: usize = 5;
 
 pub(crate) struct Store {
     pub env: Env,
+    pub(crate) vault: Option<Arc<dyn Vault<Error=crate::error::Error>>>
 }
 
 pub(crate) struct StoreTxn<'env> {
@@ -39,6 +45,8 @@ pub(crate) struct StoreTxn<'env> {
     pub targets: Db<u64, u64>,
 
     pub labels: UDb<[u8], u64>,
+
+    pub(crate) vault: Option<Arc<dyn Vault<Error=crate::error::Error>>>
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -56,7 +64,7 @@ impl Store {
         // TODO: How small can the thing be initially,
         // how many version do we want to allow?
         let env = Env::new(path, 4096 * 4, 2)?;
-        let store = Self { env };
+        let store = Self { env , vault: None};
         store.mut_txn()?.commit()?;
         Ok(store)
     }
@@ -64,9 +72,14 @@ impl Store {
     pub fn open_anon() -> Result<Self, Error> {
         // TODO: is the size good?
         let env = Env::new_anon(4096 * 4, 2)?;
-        let store = Self { env };
+        let store = Self { env , vault: None};
         store.mut_txn()?.commit()?;
         Ok(store)
+    }
+
+    pub fn with_vault<V: Vault<Error=crate::error::Error>>(mut self, vault: V) -> Self {
+        self.vault = Some(Arc::new(vault));
+        self
     }
 
     pub fn txn(&self) -> Result<StoreTxn, Error> {
@@ -86,6 +99,7 @@ impl Store {
             origins,
             targets,
             labels,
+            vault: self.vault.clone()
         })
     }
 
@@ -106,6 +120,7 @@ impl Store {
             origins,
             targets,
             labels,
+            vault: self.vault.clone()
         })
     }
 
@@ -145,7 +160,13 @@ impl<'e> StoreTxn<'e> {
         let entry = btree::get(&self.txn, &self.nodes, &id, None)?;
         if let Some((&entry_id, bytes)) = entry {
             if entry_id == id {
-                let node = bincode::deserialize(bytes)?;
+
+                let node = if let Some(vault) = &self.vault {
+                    vault.unauth_node(bytes).map_err(|_e| Error::Internal)?
+                }else {
+                    bincode::deserialize(bytes)?
+                };
+
                 Ok(Some(node))
             } else {
                 Ok(None)
@@ -159,8 +180,14 @@ impl<'e> StoreTxn<'e> {
         let entry = btree::get(&self.txn, &self.edges, &id, None)?;
         if let Some((&entry_id, bytes)) = entry {
             if entry_id == id {
-                let node = bincode::deserialize(bytes)?;
-                Ok(Some(node))
+
+                let edge = if let Some(vault) = &self.vault {
+                    vault.unauth_edge(bytes).map_err(|_e| Error::Internal)?
+                }else {
+                    bincode::deserialize(bytes)?
+                };
+
+                Ok(Some(edge))
             } else {
                 Ok(None)
             }
@@ -169,16 +196,28 @@ impl<'e> StoreTxn<'e> {
         }
     }
 
-    pub fn unchecked_create_node(&mut self, node: Node) -> Result<Node, Error> {
-        let bytes = bincode::serialize(&node)?;
-        btree::put(&mut self.txn, &mut self.nodes, &node.id, bytes.as_ref())?;
+    pub fn unchecked_create_node(&mut self, node: Node) -> Result<u64, Error> {
+
+
         btree::put(
             &mut self.txn,
             &mut self.labels,
-            node.label().as_bytes(),
+            node.label.as_bytes(),
             &node.id,
         )?;
-        Ok(node)
+
+        let node_id = node.id;
+
+        let bytes = if let Some(vault) = &self.vault {
+            vault.auth_node(node)?
+        }else {
+            bincode::serialize(&node)?
+        };
+
+        btree::put(&mut self.txn, &mut self.nodes, &node_id, bytes.as_ref())?;
+
+
+        Ok(node_id)
     }
 
     pub fn update_node(&mut self, node: u64, key: &str, value: PropOwned) -> Result<(), Error> {
@@ -188,9 +227,17 @@ impl<'e> StoreTxn<'e> {
         } else {
             node.properties.insert(key.to_string(), value);
         }
-        let bytes = bincode::serialize(&node)?;
-        btree::del(&mut self.txn, &mut self.nodes, &node.id, None)?;
-        btree::put(&mut self.txn, &mut self.nodes, &node.id, bytes.as_ref())?;
+
+        let node_id = node.id;
+
+        let bytes = if let Some(vault) = &self.vault {
+            vault.auth_node(node)?
+        }else {
+            bincode::serialize(&node)?
+        };
+
+        btree::del(&mut self.txn, &mut self.nodes, &node_id, None)?;
+        btree::put(&mut self.txn, &mut self.nodes, &node_id, bytes.as_ref())?;
         Ok(())
     }
 
@@ -219,12 +266,23 @@ impl<'e> StoreTxn<'e> {
         }
     }
 
-    pub fn unchecked_create_edge(&mut self, edge: Edge) -> Result<Edge, Error> {
-        let bytes = bincode::serialize(&edge)?;
-        btree::put(&mut self.txn, &mut self.edges, &edge.id, bytes.as_ref())?;
+    pub fn unchecked_create_edge(&mut self, edge: Edge) -> Result<u64, Error> {
+
+        
         btree::put(&mut self.txn, &mut self.origins, &edge.origin, &edge.id)?;
         btree::put(&mut self.txn, &mut self.targets, &edge.target, &edge.id)?;
-        Ok(edge)
+
+        let edge_id = edge.id;
+
+        let bytes = if let Some(vault) = &self.vault {
+            vault.auth_edge(edge)?
+        }else {
+            bincode::serialize(&edge)?
+        };
+
+        btree::put(&mut self.txn, &mut self.edges, &edge_id, bytes.as_ref())?;
+
+        Ok(edge_id)
     }
 
     pub fn update_edge(&mut self, edge: u64, key: &str, value: PropOwned) -> Result<(), Error> {
@@ -234,9 +292,17 @@ impl<'e> StoreTxn<'e> {
         } else {
             edge.properties.insert(key.to_string(), value);
         }
-        let bytes = bincode::serialize(&edge)?;
-        btree::del(&mut self.txn, &mut self.edges, &edge.id, None)?;
-        btree::put(&mut self.txn, &mut self.edges, &edge.id, bytes.as_ref())?;
+
+        let edge_id = edge.id;
+
+        let bytes = if let Some(vault) = &self.vault {
+            vault.auth_edge(edge)?
+        }else {
+            bincode::serialize(&edge)?
+        };
+
+        btree::del(&mut self.txn, &mut self.edges, &edge_id, None)?;
+        btree::put(&mut self.txn, &mut self.edges, &edge_id, bytes.as_ref())?;
         Ok(())
     }
 

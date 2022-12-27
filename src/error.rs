@@ -78,6 +78,7 @@ impl From<SanakirjaError> for Error {
             SanakirjaError::IO(err) => Self::IO(err),
             SanakirjaError::Poison => Self::Poison,
             SanakirjaError::VersionMismatch | SanakirjaError::CRC(_) => Self::Corruption,
+            sanakirja::Error::Corrupt(_) => Self::Corruption
         }
     }
 }
