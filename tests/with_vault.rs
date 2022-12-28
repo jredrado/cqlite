@@ -67,31 +67,47 @@ impl<C> Vault for SimpleVault<C>
 
 #[test]
 fn create_and_return_with_vault() {
-    let graph = Graph::open_anon().unwrap();
 
-    let vault = SimpleVault::<Prover::<(),()>>::new();
+    let comp = Prover::<(),()>::run (|| {
 
-    let graph = graph.with_vault(vault);
+        let graph = Graph::open("vault.graph").unwrap();
 
-    let mut txn = graph.mut_txn().unwrap();
-    let vals = graph
-        .prepare("CREATE (a:TEST { name: 'Peter Parker', age: 42 }) RETURN a.name, a.age")
-        .unwrap()
-        .query_map(&mut txn, (), |m| Ok((m.get(0)?, m.get(1)?)))
-        .unwrap()
-        .collect::<Result<Vec<(String, i64)>, _>>()
-        .unwrap();
-    assert_eq!(vals, vec![("Peter Parker".into(), 42)]);
-    txn.commit().unwrap();
+        let vault = SimpleVault::<Prover::<(),()>>::new();
 
-    let vals = graph
-        .prepare("MATCH (a) RETURN a.name, a.age")
-        .unwrap()
-        .query_map(&mut graph.txn().unwrap(), (), |m| {
-            Ok((m.get(0)?, m.get(1)?))
-        })
-        .unwrap()
-        .collect::<Result<Vec<(String, i64)>, _>>()
-        .unwrap();
-    assert_eq!(vals, vec![("Peter Parker".into(), 42)]);
+        let graph = graph.with_vault(vault);
+
+        let mut txn = graph.mut_txn().unwrap();
+        let vals = graph
+            .prepare("CREATE (a:TEST { name: 'Peter Parker', age: 42 }) RETURN a.name, a.age")
+            .unwrap()
+            .query_map(&mut txn, (), |m| Ok((m.get(0)?, m.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<(String, i64)>, _>>()
+            .unwrap();
+        assert_eq!(vals, vec![("Peter Parker".into(), 42)]);
+        txn.commit().unwrap();
+
+        let mut txn = graph.txn().unwrap();
+
+        let st = graph
+            .prepare("MATCH (a) RETURN a.name, a.age")
+            .unwrap();
+
+        let mq = st
+            .query_map(&mut txn, (), |m| {
+                Ok((m.get(0)?, m.get(1)?))
+            })
+            .unwrap();
+
+        let vals = mq.collect::<Result<Vec<(String, i64)>, _>>();
+        println!("{:?}",vals);
+        
+        assert_eq!(vals.unwrap(), vec![("Peter Parker".into(), 42)]);
+
+        Ok(())
+    });
+
+    println!("Computation: {:?}",comp.get());
+    println!("Computation Proofs Length: {:?}",comp.get_proofs());
+
 }

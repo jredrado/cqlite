@@ -1,8 +1,11 @@
 use super::{DynTxn, Node, StoreTxn};
 use crate::Error;
+use crate::Vault;
+
 use sanakirja::{btree, Env, UnsizedStorable};
 use serde::Deserialize;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 type BytesCursor<K, V> = btree::Cursor<K, V, btree::page_unsized::Page<K, V>>;
 
@@ -28,7 +31,7 @@ where
 }
 
 pub(crate) enum NodeIter<'txn> {
-    All(DeserializeIter<'txn, u64, Node>),
+    All(VaultNodeDeserializeIter<'txn, u64>),
     WithLabel(String, &'txn StoreTxn<'txn>, BytesCursor<[u8], u64>),
 }
 
@@ -94,7 +97,7 @@ where
         let inner = btree::iter(&txn.txn, db, origin.as_ref().map(|key| (key, None)))?;
         Ok(Self {
             inner,
-            _item: PhantomData,
+            _item: PhantomData
         })
     }
 }
@@ -109,6 +112,7 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next().map(|res| {
             res.map_err(|err| err).and_then(|(key, bytes)| {
+                
                 let item = bincode::deserialize(bytes)?;
                 Ok((key, item))
             })
@@ -118,7 +122,7 @@ where
 
 impl<'txn> NodeIter<'txn> {
     pub(crate) fn all(txn: &'txn StoreTxn<'txn>) -> Result<Self, Error> {
-        Ok(Self::All(DeserializeIter::new(txn, &txn.nodes, None)?))
+        Ok(Self::All(VaultNodeDeserializeIter::new(txn, &txn.nodes, None)?))
     }
 
     pub(crate) fn with_label(txn: &'txn StoreTxn<'txn>, label: String) -> Result<Self, Error> {
@@ -150,5 +154,54 @@ impl<'txn> Iterator for NodeIter<'txn> {
                 None => None,
             },
         }
+    }
+}
+
+
+pub(crate) struct VaultNodeDeserializeIter<'txn, K>
+where
+    K: UnsizedStorable
+{
+    inner: BytesIter<'txn, K, [u8]>,
+
+    pub(crate) vault: Option<Arc<dyn Vault<Error=crate::error::Error>>>
+}
+
+impl<'txn, K> VaultNodeDeserializeIter<'txn, K>
+where
+    K: UnsizedStorable,
+{
+    pub(crate) fn new(
+        txn: &'txn StoreTxn<'txn>,
+        db: &btree::UDb<K, [u8]>,
+        origin: Option<K>,
+    ) -> Result<Self, Error> {
+        let inner = btree::iter(&txn.txn, db, origin.as_ref().map(|key| (key, None)))?;
+        Ok(Self {
+            inner,
+            vault: txn.vault.clone()
+        })
+    }
+}
+
+impl<'txn, K> Iterator for VaultNodeDeserializeIter<'txn, K>
+where
+    K: 'txn + UnsizedStorable
+{
+    type Item = Result<(&'txn K, Node), Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|res| {
+            res.map_err(|err| err).and_then(|(key, bytes)| {
+                
+                let item = if let Some(vault) = &self.vault {
+                    vault.unauth_node(bytes).map_err(|_e| Error::Internal)?
+                }else {
+                    bincode::deserialize(bytes)?
+                };
+
+                Ok((key, item))
+            })
+        })
     }
 }
