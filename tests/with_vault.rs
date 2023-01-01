@@ -25,15 +25,20 @@ use std::sync::Arc;
 use std::cell::RefCell;
 use std::borrow::Borrow;
 
-pub struct AuthenticatedStore<C>
+pub struct AuthenticatedStore<C,MerkleStorage=MemoryDB,MerkleHasher=Blake3>
     where C:Computation + Debug 
 {
     graph : Graph,
-    _phantom: core::marker::PhantomData<C>
+    _phantom: core::marker::PhantomData<C>,
+    _phantom_storage: core::marker::PhantomData<MerkleStorage>,
+    _phantom_merkle: core::marker::PhantomData<MerkleHasher>
 }
 
-impl<C> AuthenticatedStore<C>
-    where C:Computation + Debug + 'static
+impl<C,MerkleStorage,MerkleHasher> AuthenticatedStore<C,MerkleStorage,MerkleHasher>
+    where 
+        C:Computation + Debug + 'static,
+        MerkleHasher: monotree::Hasher + 'static,
+        MerkleStorage: monotree::Database + 'static
 {
     
     pub fn  new(path: &Path) -> Self 
@@ -42,10 +47,12 @@ impl<C> AuthenticatedStore<C>
             C:AuthType<Edge>
     {
         let merkle_path = path.with_extension("merkle");
-        let vault = SimpleVault::<C>::new(&merkle_path);
+        let vault = SimpleVault::<C,MerkleStorage,MerkleHasher>::new(&merkle_path);
 
-        AuthenticatedStore::<C> {
+        AuthenticatedStore::<C,MerkleStorage,MerkleHasher> {
             _phantom: core::marker::PhantomData::<C>::default(),
+            _phantom_storage: core::marker::PhantomData::<MerkleStorage>::default(),
+            _phantom_merkle: core::marker::PhantomData::<MerkleHasher>::default(),
             graph: Graph::open(path).unwrap().with_vault(Arc::new(vault)),
         }
 
@@ -57,7 +64,7 @@ impl<C> AuthenticatedStore<C>
 }
 
 
-impl<C> Default for AuthenticatedStore<C> 
+impl<C,MerkleStorage,MerkleHasher> Default for AuthenticatedStore<C,MerkleStorage,MerkleHasher> 
     where 
         C:Computation + Debug + 'static, 
         C:AuthType<Node>,
@@ -67,8 +74,10 @@ impl<C> Default for AuthenticatedStore<C>
 
         let vault = SimpleVault::<C>::default();
 
-        AuthenticatedStore::<C> {
+        AuthenticatedStore::<C,MerkleStorage,MerkleHasher> {
             _phantom: core::marker::PhantomData::<C>::default(),
+            _phantom_storage: core::marker::PhantomData::<MerkleStorage>::default(),
+            _phantom_merkle: core::marker::PhantomData::<MerkleHasher>::default(),
             graph: Graph::open_anon().unwrap().with_vault(Arc::new(vault)),
         }
 
@@ -273,7 +282,7 @@ fn match_multiple_edges_with_vault() {
         //let graph = Graph::open("vault_multiple.graph").unwrap();
 
 
-        let vault = AuthenticatedStore::<Prover::<(),()>>::new(Path::new("/tmp/vault_multiple.graph"));
+        let vault = AuthenticatedStore::<Prover::<(),()>,Sled,Blake3>::new(Path::new("/tmp/vault_multiple.graph"));
 
 
         let result = create_text_node(&vault.graph,"dadadfd");
