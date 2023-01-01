@@ -77,8 +77,8 @@ impl Store {
         Ok(store)
     }
 
-    pub fn with_vault<V: Vault<Error=crate::error::Error>>(mut self, vault: V) -> Self {
-        self.vault = Some(Arc::new(vault));
+    pub fn with_vault(mut self, vault: Arc<dyn Vault<Error=crate::error::Error>>) -> Self {
+        self.vault = Some(vault.clone());
         self
     }
 

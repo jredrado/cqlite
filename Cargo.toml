@@ -27,6 +27,8 @@ minicbor = {git='https://github.com/jredrado/minicbor.git', branch="master", ver
 
 nanoserde = {version="0.1.29", git="https://github.com/jredrado/nanoserde.git",branch="master"}
 
+monotree = {version="0.1.4", git="https://github.com/jredrado/monotree.git", branch="master",features = ["db_sled"]}
+
 [dev-dependencies]
 corepack = { version="0.4.1"}
 criterion = { version = "0.3", features = ["html_reports"] }

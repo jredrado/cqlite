@@ -48,6 +48,8 @@
 use planner::QueryPlan;
 use runtime::{Program, Status, VirtualMachine};
 use std::{convert::TryInto, path::Path};
+use std::sync::Arc;
+
 use store::{Store, StoreTxn};
 pub use store::vault::Vault;
 pub use store::types::{Node,Edge};
@@ -152,9 +154,14 @@ impl Graph {
         Ok(Self { store })
     }
 
-    pub fn with_vault<V: Vault<Error=crate::error::Error>>(mut self, vault: V) -> Self {
+    pub fn with_vault(mut self, vault: Arc<dyn Vault<Error=crate::error::Error>>) -> Self {
         self.store = self.store.with_vault(vault);
         self
+    }
+
+    pub fn vault(&self) ->  Option<Arc<dyn Vault<Error=crate::error::Error>>> {
+        self.store.vault.clone()
+
     }
 
     /// Prepare a statement given a query `&str`. Queries support
