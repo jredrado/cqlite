@@ -75,7 +75,7 @@ pub use property::Property;
 /// Graphs may be held in-memory or persisted to a single
 /// file and support ACID queries over the graph.
 pub struct Graph {
-    store: Store,
+    pub (crate) store: Store,
 }
 
 /// An ongoing transaction.

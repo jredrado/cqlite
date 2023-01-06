@@ -19,16 +19,28 @@ use monotree::Hash;
 use monotree::Hasher;
 
 use std::fmt::Debug;
-use std::path::Path;
+use std::path::{Path,PathBuf};
 use std::fmt;
 use std::sync::Arc;
 use std::cell::RefCell;
 use std::borrow::Borrow;
 
+use serde::Serialize;
+use serde::Deserialize;
+use serde::Serializer;
+use serde::Deserializer;
+use serde::ser::SerializeStruct;
+
+use serde::de;
+use serde::de::Visitor;
+use serde::de::MapAccess;
+use serde::de::SeqAccess;
+
 pub struct AuthenticatedStore<C,MerkleStorage=MemoryDB,MerkleHasher=Blake3>
     where C:Computation + Debug 
 {
     graph : Graph,
+    path: PathBuf,
     _phantom: core::marker::PhantomData<C>,
     _phantom_storage: core::marker::PhantomData<MerkleStorage>,
     _phantom_merkle: core::marker::PhantomData<MerkleHasher>
@@ -54,6 +66,7 @@ impl<C,MerkleStorage,MerkleHasher> AuthenticatedStore<C,MerkleStorage,MerkleHash
             _phantom_storage: core::marker::PhantomData::<MerkleStorage>::default(),
             _phantom_merkle: core::marker::PhantomData::<MerkleHasher>::default(),
             graph: Graph::open(path).unwrap().with_vault(Arc::new(vault)),
+            path : path.to_owned()
         }
 
     }
@@ -79,8 +92,225 @@ impl<C,MerkleStorage,MerkleHasher> Default for AuthenticatedStore<C,MerkleStorag
             _phantom_storage: core::marker::PhantomData::<MerkleStorage>::default(),
             _phantom_merkle: core::marker::PhantomData::<MerkleHasher>::default(),
             graph: Graph::open_anon().unwrap().with_vault(Arc::new(vault)),
+            path: PathBuf::default()
         }
 
+    }
+}
+
+
+//The shallow projection of Authenticated storage is the root of the merkle tree (Vault )
+// and the paths of the graph and the merkletree
+
+const SERIALIZER_NAME :&str = "AuthenticatedStore";
+
+impl<C,MerkleStorage,MerkleHasher> Serialize for  AuthenticatedStore<C,MerkleStorage,MerkleHasher>
+    where
+        C:Computation + Debug + 'static,
+        MerkleHasher: monotree::Hasher + 'static,
+        MerkleStorage: monotree::Database + 'static,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+
+        let mut state = serializer.serialize_struct(SERIALIZER_NAME, 2)?;
+        state.serialize_field("signature", &self.signature())?;
+        state.serialize_field("path", &self.path)?;    
+        state.end()
+
+    }
+}
+
+impl<'de,C,MerkleStorage,MerkleHasher>  Deserialize<'de> for AuthenticatedStore<C,MerkleStorage,MerkleHasher> 
+    where
+        C:Computation + Debug + 'static,
+        MerkleHasher: monotree::Hasher + 'static,
+        MerkleStorage: monotree::Database + 'static,
+        C:AuthType<Node>,
+        C:AuthType<Edge>
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        enum Field { Signature, Path }
+
+        // This part could also be generated independently by:
+        //
+        //    #[derive(Deserialize)]
+        //    #[serde(field_identifier, rename_all = "lowercase")]
+        //    enum Field { Secs, Nanos }
+        impl<'de> Deserialize<'de> for Field {
+            fn deserialize<D>(deserializer: D) -> Result<Field, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                struct FieldVisitor;
+
+                impl<'de> Visitor<'de> for FieldVisitor {
+                    type Value = Field;
+
+                    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                        formatter.write_str("`signature` or `path`")
+                    }
+
+                    fn visit_str<E>(self, value: &str) -> Result<Field, E>
+                    where
+                        E: de::Error,
+                    {
+                        match value {
+                            "signature" => Ok(Field::Signature),
+                            "path" => Ok(Field::Path),
+                            _ => Err(de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+
+                deserializer.deserialize_identifier(FieldVisitor)
+            }
+        }
+
+
+        struct AuthenticatedStoreVisitor<C,MerkleStorage,MerkleHasher>{
+            _phantom: core::marker::PhantomData<C>,
+            _phantom_storage: core::marker::PhantomData<MerkleStorage>,
+            _phantom_merkle: core::marker::PhantomData<MerkleHasher>
+        }
+
+
+        impl<'de,C,MerkleStorage,MerkleHasher>  Visitor<'de> for AuthenticatedStoreVisitor<C,MerkleStorage,MerkleHasher> 
+                where
+                        C:Computation + Debug + 'static,
+                        MerkleHasher: monotree::Hasher + 'static,
+                        MerkleStorage: monotree::Database + 'static,
+                        C:AuthType<Node>,
+                        C:AuthType<Edge>
+        {
+            type Value = AuthenticatedStore::<C,MerkleStorage,MerkleHasher> ;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("struct AuthenticatedStore")
+            }
+
+            fn visit_seq<V>(self, mut seq: V) -> Result<AuthenticatedStore::<C,MerkleStorage,MerkleHasher>, V::Error>
+            where
+                V: SeqAccess<'de>,
+            {
+                let signature = seq.next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(0, &self))?;
+                let path = seq.next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(1, &self))?;
+
+                let tree = AuthenticatedStore::<C,MerkleStorage,MerkleHasher>::new(path);
+                Ok(tree)
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<AuthenticatedStore::<C,MerkleStorage,MerkleHasher> , V::Error>
+            where
+                V: MapAccess<'de>,
+            {
+                let mut signature = None;
+                let mut path = None;
+
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::Signature => {
+                            if signature.is_some() {
+                                return Err(de::Error::duplicate_field("signature"));
+                            }
+                            signature = Some(map.next_value()?);
+                        }
+                        Field::Path => {
+                            if path.is_some() {
+                                return Err(de::Error::duplicate_field("path"));
+                            }
+                            path = Some(map.next_value()?);
+                        }                       
+                    }
+                }
+
+                let signature = signature.ok_or_else(|| de::Error::missing_field("signature"))?;
+                let path = path.ok_or_else(|| de::Error::missing_field("path"))?;
+
+                let tree = AuthenticatedStore::<C,MerkleStorage,MerkleHasher>::new(path);
+                Ok(tree)
+            }
+        }
+
+        const FIELDS: &'static [&'static str] = &["signature", "path"];
+        deserializer.deserialize_struct(SERIALIZER_NAME, FIELDS,  AuthenticatedStoreVisitor::<C,MerkleStorage,MerkleHasher>{
+                _phantom: core::marker::PhantomData::<C>::default(),
+                _phantom_storage: core::marker::PhantomData::<MerkleStorage>::default(),
+                _phantom_merkle: core::marker::PhantomData::<MerkleHasher>::default(),
+        })
+    }
+}
+
+
+impl<C,MerkleStorage,MerkleHasher> core::fmt::Debug for AuthenticatedStore<C,MerkleStorage,MerkleHasher>  
+    where
+        C:Computation + Debug + 'static,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthenticatedStore")
+         .field("path", &self.path)
+         .finish()
+    }
+}
+
+impl<C,MerkleStorage,MerkleHasher> Clone for AuthenticatedStore<C,MerkleStorage,MerkleHasher>    
+    where
+        C:Computation + Debug + 'static,
+        MerkleHasher: monotree::Hasher + 'static,
+        MerkleStorage: monotree::Database + 'static,
+        C:AuthType<Node>,
+        C:AuthType<Edge>
+{
+    fn clone(&self) -> Self {
+        AuthenticatedStore::<C,MerkleStorage,MerkleHasher>::new(&self.path)
+    }
+}
+
+
+impl<C,MerkleStorage,MerkleHasher,Rhs> PartialEq<Rhs> for AuthenticatedStore<C,MerkleStorage,MerkleHasher>  
+    where
+        Rhs: ?Sized,
+        C:Computation + Debug
+
+{
+    fn eq(&self, other: &Rhs) -> bool{
+        todo!()
+    }
+}  
+
+impl<C,MerkleStorage,MerkleHasher> authcomp::ToJSON for AuthenticatedStore<C,MerkleStorage,MerkleHasher>  
+    where   
+        C:Computation + Debug
+{
+
+    fn ser_json (&self, d: usize, s: &mut authcomp::JSONState) {
+        todo!()
+    }
+}
+
+impl<C,MerkleStorage,MerkleHasher> minicbor::Encode for AuthenticatedStore<C,MerkleStorage,MerkleHasher>      
+    where
+        C:Computation + Debug + 'static,
+{
+    fn encode<W: minicbor::encode::Write>(&self, e: &mut minicbor::Encoder<W>) -> Result<(), minicbor::encode::Error<W::Error>> {
+        todo!()
+    }
+}
+
+
+impl<'b, C,MerkleStorage,MerkleHasher> minicbor::Decode<'b> for AuthenticatedStore<C,MerkleStorage,MerkleHasher>     
+    where
+        C:Computation + Debug + 'static,
+{
+    fn decode(d: &mut minicbor::decode::Decoder<'b>) -> Result<Self, minicbor::decode::Error> {
+        todo!()
     }
 }
 
@@ -316,8 +546,11 @@ fn match_multiple_edges_with_vault() {
         //let graph = Graph::open("vault_multiple.graph").unwrap();
 
 
-        let vault = AuthenticatedStore::<Prover::<(),()>,Sled,Blake3>::new(Path::new("/tmp/vault_multiple.graph"));
+        //let vault_auth = Prover::<(),()>::auth(AuthenticatedStore::<Prover::<(),()>,Sled,Blake3>::new(Path::new("/tmp/vault_multiple.graph")));
+        //let vault_unauth_ref = vault_auth.unauth();
+        //let vault : &AuthenticatedStore::<Prover::<(),()>,Sled,Blake3> =  &(*vault_unauth_ref).borrow();
 
+        let vault = AuthenticatedStore::<Prover::<(),()>,Sled,Blake3>::new(Path::new("/tmp/vault_multiple.graph"));
 
         let node_id_1 = create_text_node(&vault.graph,"dadadfd").map_err( |_e| ())?;
         let node_id_2 = create_text_node(&vault.graph,"dadadfddadfsdfdf").map_err( |_e| ())?;
@@ -365,6 +598,8 @@ fn match_multiple_edges_with_vault() {
 
         println!("{:?}", pairs);
         
+        let vault_auth = Prover::<(),()>::auth(vault);
+        println!("Structure signature: {:?}",Prover::<(),()>::signature(&vault_auth));
 
         Ok(())
     });
