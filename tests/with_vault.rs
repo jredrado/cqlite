@@ -268,9 +268,43 @@ fn create_element_node<'a: 'b,'b> (graph: &'a Graph, tag: &str,children:&Vec<NOD
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
+    let element_id = result.get(0).ok_or(crate::Error::Internal)?;
+
+    if !children.is_empty() {
+            //not id in ()
+            let mut where_string = String::from("where ");
+            let mut child_iter = children.iter();
+
+            //First element
+            if let Some(child_id) = child_iter.next() {
+                where_string.push_str( &format!("ID(c) = {}",child_id));
+            }
+
+            //Rest ot elements
+            for child_id in child_iter {
+                where_string.push_str( &format!(" or ID(c) = {}",child_id));
+            }
+
+            where_string.push_str(&format!(" and ID(n) = {}",element_id));
+
+            let query_string = format!("MATCH (c) MATCH (n) {} CREATE (n) -[:CHILD]-> (c) RETURN ID(n),ID(c)", where_string);
+    
+            println!("{}",query_string);
+
+            let result : Vec<(u64,u64)> = graph
+                .prepare(&query_string)?
+                .query_map(&mut txn, (("tag", tag),), |m| {
+                    Ok((m.get(0)?,m.get(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            
+            println!("{:?}",result);
+    }
+
     txn.commit()?;
 
-    result.get(0).copied().ok_or(crate::Error::Internal)
+    Ok(*element_id)
+
 }
 
 
@@ -285,12 +319,16 @@ fn match_multiple_edges_with_vault() {
         let vault = AuthenticatedStore::<Prover::<(),()>,Sled,Blake3>::new(Path::new("/tmp/vault_multiple.graph"));
 
 
-        let result = create_text_node(&vault.graph,"dadadfd");
+        let node_id_1 = create_text_node(&vault.graph,"dadadfd").map_err( |_e| ())?;
+        let node_id_2 = create_text_node(&vault.graph,"dadadfddadfsdfdf").map_err( |_e| ())?;
 
+        let mut children = Vec::<u64>::new();
+        children.push(node_id_1);
+        children.push(node_id_2);
 
-        println!("Result {:?}",result);
+        println!("Result {:?} {:?}",node_id_1,node_id_2);
 
-        let result = create_element_node(&vault.graph,"title",&Vec::new());
+        let result = create_element_node(&vault.graph,"title",&children);
 
 
         println!("Result {:?}",result);
@@ -313,20 +351,20 @@ fn match_multiple_edges_with_vault() {
         txn.commit().unwrap();
         */
 
-        /* 
-        let mut pairs: Vec<(u64, u64)> = graph
-            .prepare("MATCH (a) -> (b) RETURN ID(a), ID(b)")
+         
+        let mut pairs: Vec<(u64, u64,String,String)> = vault.graph
+            .prepare("MATCH (a) -> (b) RETURN ID(a), ID(b), a.tag, b.value")
             .unwrap()
-            .query_map(&mut graph.txn().unwrap(), (), |m| {
-                Ok((m.get(0)?, m.get(1)?))
+            .query_map(&mut vault.graph.txn().unwrap(), (), |m| {
+                Ok((m.get(0)?, m.get(1)?,m.get(2)?,m.get(3)?))
             })
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         pairs.sort_unstable();
 
-        assert_eq!(pairs, [(0, 1), (0, 2)]);
-        */
+        println!("{:?}", pairs);
+        
 
         Ok(())
     });
