@@ -103,6 +103,7 @@ try_from!(bool, Boolean);
 try_from!(String, Text);
 try_from!(Vec<u8>, Blob);
 
+
 from!(i32, Integer);
 from!(&str, Text);
 from!(&[u8], Blob);

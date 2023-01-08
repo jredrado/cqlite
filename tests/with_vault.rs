@@ -17,7 +17,9 @@ use monotree::database::MemoryDB;
 use monotree::hasher::{Blake2b,Blake3};
 use monotree::Hash;
 use monotree::Hasher;
+use petgraph::graphmap::NodeTrait;
 
+use core::num;
 use std::fmt::Debug;
 use std::path::{Path,PathBuf};
 use std::fmt;
@@ -35,6 +37,10 @@ use serde::de;
 use serde::de::Visitor;
 use serde::de::MapAccess;
 use serde::de::SeqAccess;
+
+use collecting_hashmap::CollectingHashMap;
+
+use minicbor::{Encode,Decode};
 
 pub struct AuthenticatedGraph<C,MerkleStorage=MemoryDB,MerkleHasher=Blake3>
     where C:Computation + Debug 
@@ -74,6 +80,89 @@ impl<C,MerkleStorage,MerkleHasher> AuthenticatedGraph<C,MerkleStorage,MerkleHash
     pub fn signature (&self) -> Option<Hash> {
             self.graph.vault().map( |v| v.signature()).flatten()
     }
+
+    pub fn create_text_node<'a: 'b,'b> (&'a self, value: String) -> Result<u64,crate::Error> {
+
+        let mut txn = self.graph.mut_txn().unwrap();
+    
+        let payload_bytes = to_vec(&value);
+
+        let result : Vec<u64> = self.graph
+            .prepare("CREATE (n:text { type:'text', payload:$payload }) RETURN ID(n)")?
+            .query_map(&mut txn, (("payload", payload_bytes),), |m| {
+                Ok(m.get(0)?)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+    
+        txn.commit()?;
+    
+        result.get(0).copied().ok_or(crate::Error::Internal)
+    }
+    
+    pub fn create_element_node<'a: 'b,'b,P:Encode + Decode<'a>> (&'a self, tag: &str,children:&Vec<u64>,properties:&Vec<(String,String)>,root: bool, payload: P ) -> Result<u64,crate::Error> {
+    
+        let mut txn = self.graph.mut_txn().unwrap();
+    
+        let mut string_properties = properties.iter().map ( |(key,value)| format!(" {}:'{}'",key,value)).collect::<Vec<_>>().join(",");
+
+        if !string_properties.is_empty() {
+            string_properties.insert_str(0,", ");
+        }
+
+        let root_string = if root { "TRUE" } else { "FALSE" };
+
+        let query_string = format!("CREATE (n:element {{ type:'element', root: {} , tag:$tag , payload:$payload {} }}) RETURN ID(n)",root_string,string_properties);
+
+        println!("{}",&query_string);
+
+        let payload_bytes = to_vec(&payload);
+
+        let result : Vec<u64> = self.graph
+            .prepare(&query_string)?
+            .query_map(&mut txn, (("tag", tag),("payload",payload_bytes),), |m| {
+                Ok(m.get(0)?)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+    
+        let element_id = result.get(0).ok_or(crate::Error::Internal)?;
+    
+        if !children.is_empty() {
+                //not id in ()
+                let mut where_string = String::from("where ");
+                let mut child_iter = children.iter();
+    
+                //First element
+                if let Some(child_id) = child_iter.next() {
+                    where_string.push_str( &format!("ID(c) = {}",child_id));
+                }
+    
+                //Rest ot elements
+                for child_id in child_iter {
+                    where_string.push_str( &format!(" or ID(c) = {}",child_id));
+                }
+    
+                where_string.push_str(&format!(" and ID(n) = {}",element_id));
+    
+                let query_string = format!("MATCH (c) MATCH (n) {} CREATE (n) -[:CHILD]-> (c) RETURN ID(n),ID(c)", where_string);
+        
+                println!("{}",query_string);
+    
+                let result : Vec<(u64,u64)> = self.graph
+                    .prepare(&query_string)?
+                    .query_map(&mut txn, (("tag", tag),), |m| {
+                        Ok((m.get(0)?,m.get(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                
+                println!("{:?}",result);
+        }
+    
+        txn.commit()?;
+    
+        Ok(*element_id)
+    
+    }
+    
 }
 
 
@@ -418,6 +507,87 @@ impl<C,MerkleStorage,MerkleHasher> Vault for SimpleVault<C,MerkleStorage,MerkleH
 
 }
 
+
+use petgraph::prelude::*;
+
+#[derive(Debug)]
+struct MemoryGraph<N: std::hash::Hash + std::cmp::Eq ,E>{
+    graph : DiGraphMap<N,E>,
+    payloads : std::collections::HashMap<N,Vec<u8>>
+}
+
+
+
+impl<N,E> MemoryGraph<N,E> 
+    where   
+        N: NodeTrait
+{
+    fn new() -> Self {
+        MemoryGraph::<N,E> {
+            graph: DiGraphMap::<N,E>::new(),
+            payloads: std::collections::HashMap::<N,Vec<u8>>::new()
+        }
+    }
+
+}
+
+impl std::iter::FromIterator<(u64,u64)> for MemoryGraph<u64,()>
+
+{
+    fn from_iter<I: IntoIterator<Item=(u64,u64)>>(iter: I) -> Self {
+
+        MemoryGraph::<u64,()> {
+            graph: DiGraphMap::<_,()>::from_edges(iter),
+            payloads: std::collections::HashMap::<u64,Vec<u8>>::new()
+        }
+    }
+}
+
+
+impl<'a> std::iter::FromIterator<(u64,Vec<u8>,u64,Vec<u8>)> for MemoryGraph<u64,()>
+
+{
+    fn from_iter<I: IntoIterator<Item=(u64,Vec<u8>,u64,Vec<u8>)>>(iter: I) -> Self {
+       
+        let mut payloads = std::collections::HashMap::<u64,Vec<u8>>::new();
+
+        let graph = DiGraphMap::<_,()>::from_edges(
+                            iter.into_iter()
+                            .map( |(n_id,n_payload,t_id,t_payload)|{ 
+                                payloads.insert(n_id,n_payload);
+                                payloads.insert(t_id,t_payload);
+                                (n_id,t_id) 
+                            }));
+
+        MemoryGraph::<u64,()> {
+                graph,
+                payloads
+        }
+        
+    }
+}
+
+pub fn to_vec <A> (value: &A) -> Vec<u8>
+        where A: Encode                
+{
+        
+        use minicbor::Encoder;
+
+        let mut e = Encoder::new(Vec::new());
+        value.encode(&mut e);
+
+        e.into_inner()
+
+                
+}
+
+pub fn from_bytes<'a,A: Decode<'a>> (value: &'a[u8]) -> Result<A,minicbor::decode::Error> {
+
+        minicbor::decode(value)
+        //.map_err(|e| error::Error::Shallow(String::from(format!("{:?}",e))))
+        
+}
+
 //cargo test -- --test-threads=1 --nocapture
 //Globals is not thread safe
 
@@ -470,74 +640,12 @@ fn create_and_return_with_vault() {
 }
 
 
-type NODE_ID = u64;
-
-fn create_text_node<'a: 'b,'b> (graph: &'a Graph, value: &str) -> Result<NODE_ID,crate::Error> {
-
-    let mut txn = graph.mut_txn().unwrap();
-
-    let result : Vec<u64> = graph
-        .prepare("CREATE (n:text { type:'text', value:$value }) RETURN ID(n)")?
-        .query_map(&mut txn, (("value", value),), |m| {
-            Ok(m.get(0)?)
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    txn.commit()?;
-
-    result.get(0).copied().ok_or(crate::Error::Internal)
-}
-
-fn create_element_node<'a: 'b,'b> (graph: &'a Graph, tag: &str,children:&Vec<NODE_ID>) -> Result<NODE_ID,crate::Error> {
-
-    let mut txn = graph.mut_txn().unwrap();
-
-    let result : Vec<u64> = graph
-        .prepare("CREATE (n:element { type:'element', tag:$tag }) RETURN ID(n)")?
-        .query_map(&mut txn, (("tag", tag),), |m| {
-            Ok(m.get(0)?)
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let element_id = result.get(0).ok_or(crate::Error::Internal)?;
-
-    if !children.is_empty() {
-            //not id in ()
-            let mut where_string = String::from("where ");
-            let mut child_iter = children.iter();
-
-            //First element
-            if let Some(child_id) = child_iter.next() {
-                where_string.push_str( &format!("ID(c) = {}",child_id));
-            }
-
-            //Rest ot elements
-            for child_id in child_iter {
-                where_string.push_str( &format!(" or ID(c) = {}",child_id));
-            }
-
-            where_string.push_str(&format!(" and ID(n) = {}",element_id));
-
-            let query_string = format!("MATCH (c) MATCH (n) {} CREATE (n) -[:CHILD]-> (c) RETURN ID(n),ID(c)", where_string);
-    
-            println!("{}",query_string);
-
-            let result : Vec<(u64,u64)> = graph
-                .prepare(&query_string)?
-                .query_map(&mut txn, (("tag", tag),), |m| {
-                    Ok((m.get(0)?,m.get(1)?))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            
-            println!("{:?}",result);
+fn get_blob<'a> (p: &'a Property) -> Result<&'a [u8],cqlite::Error> {
+    match p {
+        Property::Blob(b) => Ok(b.as_slice()),
+        _ => Err(cqlite::Error::Internal)
     }
-
-    txn.commit()?;
-
-    Ok(*element_id)
-
 }
-
 
 #[test]
 fn match_multiple_edges_with_vault() {
@@ -551,23 +659,36 @@ fn match_multiple_edges_with_vault() {
         //let vault_unauth_ref = vault_auth.unauth();
         //let vault : &AuthenticatedGraph::<Prover::<(),()>,Sled,Blake3> =  &(*vault_unauth_ref).borrow();
 
-        let vault = AuthenticatedGraph::<Prover::<(),()>,Sled,Blake3>::new(Path::new("/tmp/vault_multiple.graph"));
+        let vault = AuthenticatedGraph::<Prover::<(),()>,Sled,Blake3>::new(Path::new("/tmp/vault_multiple3.graph"));
 
-        let node_id_1 = create_text_node(&vault.graph,"dadadfd").map_err( |_e| ())?;
-        let node_id_2 = create_text_node(&vault.graph,"dadadfddadfsdfdf").map_err( |_e| ())?;
+        let node_id_1 = vault.create_text_node(String::from("text1")).map_err( |_e| ())?;
+        let node_id_2 = vault.create_text_node(String::from("text2")).map_err( |_e| ())?;
+
+        let node_id_3 = vault.create_text_node(String::from("text3")).map_err( |_e| ())?;     
+        let mut children = Vec::<u64>::new();
+        children.push(node_id_3);
+
+        let node_id_4 = vault.create_element_node("p",&children,&Vec::new(),false,"dadfd").map_err( |_e| ())?;
 
         let mut children = Vec::<u64>::new();
         children.push(node_id_1);
         children.push(node_id_2);
+        children.push(node_id_4);
 
         println!("Result {:?} {:?}",node_id_1,node_id_2);
 
-        let result = create_element_node(&vault.graph,"title",&children);
+        let mut properties = Vec::<(String,String)>::new();
+        properties.push(("prop1".to_string(),"esto es una prueba".to_string()));
+        properties.push(("prop2".to_string(),"5".to_string()));
+
+        let root = vault.create_element_node("title",&children,&properties,true,"ddkdkdldl").map_err( |_e| ())?;
 
 
-        println!("Result {:?}",result);
+        println!("Root {:?}",root);
 
         println!("Signature {:?}",vault.signature());
+
+  
 
         /* 
         let result : Vec<u64> = graph
@@ -586,19 +707,57 @@ fn match_multiple_edges_with_vault() {
         */
 
          
-        let mut pairs: Vec<(u64, u64,String,String)> = vault.graph
-            .prepare("MATCH (a) -> (b) RETURN ID(a), ID(b), a.tag, b.value")
+        /* 
+        let mut pairs: CollectingHashMap<u64, u64> = vault.graph
+            .prepare("MATCH (a) -[e:CHILD]-> (b) RETURN ID(a), ID(b)")
+            .unwrap()
+            .query_map(&mut vault.graph.txn().unwrap(), (), |m| {
+                Ok((m.get(0)?, m.get(1)?))
+            })
+            .unwrap()
+            .collect::<Result<CollectingHashMap<_,_>, _>>()
+            .unwrap();
+        */
+
+        let gr: Vec<(u64,Vec<u8>,u64,Vec<u8>)>= vault.graph
+            .prepare("MATCH (a) -[e:CHILD]-> (b) RETURN ID(a), a.payload, ID(b), b.payload")
             .unwrap()
             .query_map(&mut vault.graph.txn().unwrap(), (), |m| {
                 Ok((m.get(0)?, m.get(1)?,m.get(2)?,m.get(3)?))
             })
             .unwrap()
-            .collect::<Result<Vec<_>, _>>()
+            .collect::<Result<Vec<(_,_,_,_)>, _>>()
             .unwrap();
-        pairs.sort_unstable();
 
-        println!("{:?}", pairs);
+        println!("Edges {:?}", gr);
+
+        let gr: MemoryGraph<u64,()> = vault.graph
+            .prepare("MATCH (a) -[e:CHILD]-> (b) RETURN ID(a), a.payload, ID(b), b.payload")
+            .unwrap()
+            .query_map(&mut vault.graph.txn().unwrap(), (), |m| {
+                Ok((m.get(0)?, m.get(1)?,m.get(2)?,m.get(3)?))
+            })
+            .unwrap()
+            .collect::<Result<MemoryGraph<_,_>, _>>()
+            .unwrap();
+
+
+        println!("MemoryGraph {:?}", gr);
         
+         
+        println!("DFS: ");
+        let mut dfs = Dfs::new(&gr.graph, root);
+        while let Some(node) = dfs.next(&gr.graph) {
+            print!(" {:?}",node)
+        }
+
+        println!("\nBFS: ");
+        let mut bfs = Bfs::new(&gr.graph, root);
+        while let Some(node) = bfs.next(&gr.graph) {
+            print!(" {:?}",node)
+        }
+        
+
         let vault_auth = Prover::<(),()>::auth(vault);
         println!("Structure signature: {:?}",Prover::<(),()>::signature(&vault_auth));
 
